@@ -20,12 +20,29 @@
 #include "SkRect.h"
 #include "SkCanvas.h"
 
+#ifdef SEC_SKIAHWJPEG
+#ifdef SAMSUNG_EXYNOS4x12
+#include "SkFimpV2x.h"
+#endif // SAMSUNG_EXYNOS4x12
+#endif
 
 #include <stdio.h>
 extern "C" {
     #include "jpeglib.h"
     #include "jerror.h"
+#ifdef SEC_SKIAHWJPEG
+    #include <cutils/log.h>
+#endif
 }
+
+#ifdef SEC_HWJPEG_G2D
+#if defined(SAMSUNG_EXYNOS4210)
+#include "SkFimgApi3x.h"
+#endif
+#if defined(SAMSUNG_EXYNOS4x12)
+#include "SkFimgApi4x.h"
+#endif
+#endif
 
 // These enable timing code that report milliseconds for an encoding/decoding
 //#define TIME_ENCODE
@@ -513,7 +530,7 @@ static void fill_below_level(int y, SkBitmap* bitmap) {
  *  Get the config and bytes per pixel of the source data. Return
  *  whether the data is supported.
  */
-static bool get_src_config(const jpeg_decompress_struct& cinfo,
+bool get_src_config(const jpeg_decompress_struct& cinfo,
                            SkScaledBitmapSampler::SrcConfig* sc,
                            int* srcBytesPerPixel) {
     SkASSERT(sc != NULL && srcBytesPerPixel != NULL);
@@ -598,6 +615,150 @@ SkImageDecoder::Result SkJPEGImageDecoder::onDecode(SkStream* stream, SkBitmap* 
                                                      colorType, alphaType));
         return success ? kSuccess : kFailure;
     }
+
+    //SkDebugf("%s before", __func__);
+#ifdef SEC_SKIAHWJPEG
+    //SkDebugf("%s I'm in 1", __func__);
+#ifdef SAMSUNG_EXYNOS4x12
+    //SkDebugf("%s I'm in 2", __func__);
+    const void *jpeg_out;
+    int jpeg_ret = 0;
+
+    SecJPEGCodec *sec_jpeg = new SecJPEGCodec;
+
+    bm->setInfo(SkImageInfo::Make(cinfo.image_width, cinfo.image_height, colorType, alphaType));
+
+    jpeg_ret = sec_jpeg->checkHwJPEGSupport(bm->config(), &cinfo, sampleSize);
+    if (jpeg_ret != true) {
+        sec_jpeg->setHwJPEGFlag(false);
+        SkDebugf("%s checkHwJPEGSupport was false -> SWJPEG", __func__);
+        goto SWJPEG;
+    }
+
+    if (sec_jpeg->isHwJPEG() == true) {
+    	SkDebugf("%s isHwJPEG", __func__);
+    	jpeg_ret = sec_jpeg->setDecodeHwJPEGConfig(bm->config(), &cinfo, stream);
+        if (jpeg_ret < 0) {
+            sec_jpeg->setHwJPEGFlag(false);
+            ALOGE("[%s]JPEG Decode Setup failed", __func__);
+            goto SWJPEG;
+        }
+
+        jpeg_ret = sec_jpeg->setHwJPEGInputBuffer(stream);
+        if (jpeg_ret < 0) {
+            sec_jpeg->setHwJPEGFlag(false);
+            ALOGD("[%s]JPEG Decode IN Buffer alloc failed", __func__);
+            goto SWJPEG;
+        }
+
+        jpeg_out = sec_jpeg->setHwJPEGOutputBuffer();
+        if (jpeg_out <= 0) {
+            sec_jpeg->setHwJPEGFlag(false);
+            ALOGE("[%s]JPEG Decode OUT Buffer alloc failed", __func__);
+            goto SWJPEG;
+        }
+
+        jpeg_ret = sec_jpeg->executeDecodeHwJPEG();
+        if (jpeg_ret < 0) {
+            sec_jpeg->setHwJPEGFlag(false);
+            ALOGE("[%s]JPEG Decode EXE failed", __func__);
+            goto SWJPEG;
+        }
+    }
+
+    if (sec_jpeg->isHwJPEG() == true) {
+    	sampleSize = recompute_sampleSize(sampleSize, cinfo);
+    	ALOGE("%s:%d sampleSize=%d", __func__, __LINE__);
+
+#ifdef SK_SUPPORT_LEGACY_IMAGEDECODER_CHOOSER
+		// should we allow the Chooser (if present) to pick a colortype for us???
+		if (!this->chooseFromOneChoice(colorType, cinfo.output_width, cinfo.output_height)) {
+			return return_failure(cinfo, *bm, "chooseFromOneChoice");
+		}
+ #endif
+
+		SkScaledBitmapSampler sampler(cinfo.output_width, cinfo.output_height, sampleSize);
+		// Assume an A8 bitmap is not opaque to avoid the check of each
+		// individual pixel. It is very unlikely to be opaque, since
+		// an opaque A8 bitmap would not be very interesting.
+		// Otherwise, a jpeg image is opaque.
+		bm->setInfo(SkImageInfo::Make(sampler.scaledWidth(), sampler.scaledHeight(),
+									  colorType, alphaType));
+		if (SkImageDecoder::kDecodeBounds_Mode == mode) {
+			ALOGE("%s SkImageDecoder::kDecodeBounds_Mode == mode     return kSuccess", __func__);
+			delete sec_jpeg;
+			return kSuccess;
+		}
+		if (!this->allocPixelRef(bm, NULL)) {
+			ALOGE("%s !this->allocPixelRef(bm, NULL)...    return_failure", __func__);
+			delete sec_jpeg;
+			return return_failure(cinfo, *bm, "allocPixelRef");
+		}
+
+		SkAutoLockPixels alp2(*bm);
+		ALOGE("%s:%d SkAutoLockPixels alp(*bm);", __func__, __LINE__);
+
+        bm->lockPixels();
+        ALOGE("%s bm->lockPixels()", __func__);
+        JSAMPLE* rowptr = (JSAMPLE*)bm->getPixels();
+        ALOGE("%s JSAMPLE* rowptr = (JSAMPLE*)bm->getPixels();", __func__);
+        bm->unlockPixels();
+        ALOGE("%s bm->unlockPixels();", __func__);
+        bool reuseBitmap = (rowptr != NULL);
+        if (reuseBitmap && ((int) cinfo.output_width != bm->width() ||
+                (int) cinfo.output_height != bm->height())) {
+            // Dimensions must match
+        	ALOGE("%s Dimensions must match", __func__);
+            delete sec_jpeg;
+            return kFailure;
+        }
+
+        if (!reuseBitmap) {
+        	ALOGE("%s reuseBitmap=%d", __func__, reuseBitmap);
+            bm->setConfig(bm->config(), cinfo.output_width, cinfo.output_height, kOpaque_SkAlphaType);
+            ALOGE("%s bm->setConfig(%d, %d, %d, kOpaque_SkAlphaType);", __func__, bm->config(), cinfo.output_width, cinfo.output_height);
+            if (SkImageDecoder::kDecodeBounds_Mode == mode) {
+            	ALOGE("%s SkImageDecoder::kDecodeBounds_Mode == mode     return kSuccess", __func__);
+                delete sec_jpeg;
+                return kSuccess;
+            }
+            if (!this->allocPixelRef(bm, NULL)) {
+            	ALOGE("%s !this->allocPixelRef(bm, NULL)...    return_failure", __func__);
+                delete sec_jpeg;
+                return return_failure(cinfo, *bm, "allocPixelRef");
+            }
+        } else if (SkImageDecoder::kDecodeBounds_Mode == mode) {
+        	ALOGE("%s reuseBitmap=%d", __func__, reuseBitmap);
+        	ALOGE("%s SkImageDecoder::kDecodeBounds_Mode == mode     return kSuccess", __func__);
+            delete sec_jpeg;
+            return kSuccess;
+        }
+        SkAutoLockPixels alp(*bm);
+        rowptr = (JSAMPLE*)bm->getPixels();
+        ALOGE("%s rowptr=0x%x", __func__, rowptr);
+
+        sec_jpeg->outputJpeg(bm, rowptr);
+        ALOGE("%s after sec_jpeg->outputJpeg(bm, rowptr);", __func__);
+
+        jpeg_destroy_decompress(&cinfo);
+
+        delete sec_jpeg;
+
+        /*if (reuseBitmap) {
+        	ALOGE("%s reuseBitmap=%d", __func__, reuseBitmap);
+        	ALOGE("%s notifyPixelsChanged", __func__);
+            bm->notifyPixelsChanged();
+        }*/
+
+        ALOGE("%s returning kSuccess", __func__);
+        return kSuccess;
+    }
+SWJPEG:
+    ALOGE("%s switching to SWJPEG", __func__);
+    delete sec_jpeg;
+
+#endif // SAMSUNG_EXYNOS4x12
+#endif // SEC_SKIAHWJPEG
 
     /*  image_width and image_height are the original dimensions, available
         after jpeg_read_header(). To see the scaled dimensions, we have to call

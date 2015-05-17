@@ -585,6 +585,23 @@ LOCAL_EXPORT_C_INCLUDE_DIRS := \
 	$(LOCAL_PATH)/include/utils \
 	$(LOCAL_PATH)/src/utils
 
+###################### SEC HW JPEG ##########################
+ifeq ($(BOARD_USES_SKIAHWJPEG),true)
+ifeq ($(filter-out exynos4,$(TARGET_BOARD_PLATFORM)),)
+ifeq ($(TARGET_SOC), exynos4x12)
+LOCAL_CFLAGS += -DSEC_SKIAHWJPEG
+LOCAL_CFLAGS += -DSAMSUNG_EXYNOS4x12
+LOCAL_C_INCLUDES += $(TOP)/hardware/samsung/exynos4/hal/include
+LOCAL_SRC_FILES += \
+	src/core/SkFimgApi4x.cpp \
+	src/images/SkFimpV2x.cpp \
+	src/images/csc_swap_1st_3rd_byte_neon.s \
+	src/images/csc_swap_1st_3rd_byte_mask_neon.s
+LOCAL_SHARED_LIBRARIES += libhwjpeg libsecion libfimg
+endif
+endif
+endif
+
 LOCAL_MODULE := \
 	libskia
 
